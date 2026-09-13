@@ -1,0 +1,6 @@
+{
+  "name": "MPLADS Risk Intelligence",
+  "description": "AI-Assisted Anomaly Detection & Investigation Support System for MPLADS government projects.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
