@@ -1,8 +1,9 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+import requests
+import pandas as pd
 
 from .ml_pipeline import run_pipeline
-import pandas as pd
 
 
 # ============================================================
@@ -55,6 +56,7 @@ def clean_value(value):
 
     return value
 
+
 # ============================================================
 # HOME
 # ============================================================
@@ -69,6 +71,127 @@ def home():
 
 
 # ============================================================
+# MPLADS FILTER DATA
+# STATES
+# ============================================================
+
+@app.get("/states")
+def get_states():
+
+    url = (
+        "https://mplads.mospi.gov.in/"
+        "rest/PreLoginDashboardData/getStateData"
+    )
+
+    try:
+
+        response = requests.post(
+            url,
+            json={},
+            timeout=30
+        )
+
+    except requests.RequestException as e:
+
+        raise HTTPException(
+            status_code=502,
+            detail=f"Unable to connect to MPLADS: {str(e)}"
+        )
+
+    if response.status_code != 200:
+
+        raise HTTPException(
+            status_code=502,
+            detail="Unable to fetch state data from MPLADS"
+        )
+
+    return response.json()
+
+
+# ============================================================
+# MPLADS FILTER DATA
+# CONSTITUENCIES BY STATE
+# ============================================================
+
+@app.get("/constituencies/{state_id}")
+def get_constituencies(state_id: int):
+
+    url = (
+        "https://mplads.mospi.gov.in/"
+        "rest/PreLoginDashboardData/getConstituencyData"
+    )
+
+    try:
+
+        response = requests.post(
+            url,
+            json={
+                "id": str(state_id)
+            },
+            timeout=30
+        )
+
+    except requests.RequestException as e:
+
+        raise HTTPException(
+            status_code=502,
+            detail=f"Unable to connect to MPLADS: {str(e)}"
+        )
+
+    if response.status_code != 200:
+
+        raise HTTPException(
+            status_code=502,
+            detail="Unable to fetch constituency data from MPLADS"
+        )
+
+    return response.json()
+
+
+# ============================================================
+# MPLADS FILTER DATA
+# MPs BY CONSTITUENCY
+# ============================================================
+
+@app.get("/mps/{state_id}/{constituency_id}")
+def get_mps(
+    state_id: int,
+    constituency_id: int
+):
+
+    url = (
+        "https://mplads.mospi.gov.in/"
+        "rest/PreLoginDashboardData/getMpAndConstCombo"
+    )
+
+    try:
+
+        response = requests.post(
+            url,
+            json={
+                "const_combo": f"{constituency_id},{state_id},"
+            },
+            timeout=30
+        )
+
+    except requests.RequestException as e:
+
+        raise HTTPException(
+            status_code=502,
+            detail=f"Unable to connect to MPLADS: {str(e)}"
+        )
+
+    if response.status_code != 200:
+
+        raise HTTPException(
+            status_code=502,
+            detail="Unable to fetch MP data from MPLADS"
+        )
+
+    return response.json()
+
+
+# ============================================================
 # GET ALL PROJECTS
 # ============================================================
 
@@ -78,7 +201,6 @@ def get_projects():
     projects = run_pipeline()
 
     results = []
-
 
     for _, row in projects.iterrows():
 
@@ -145,7 +267,6 @@ def get_projects():
             )
         })
 
-
     return {
         "total_projects": len(results),
         "projects": results
@@ -161,13 +282,11 @@ def get_project(project_id: float):
 
     projects = run_pipeline()
 
-
     project = projects[
         projects[
             "WORK_RECOMMENDATION_DTL_ID"
         ] == project_id
     ]
-
 
     if project.empty:
 
@@ -176,9 +295,7 @@ def get_project(project_id: float):
             detail="Project not found"
         )
 
-
     row = project.iloc[0]
-
 
     return {
 
@@ -319,7 +436,6 @@ def get_high_risk_projects():
 
     projects = run_pipeline()
 
-
     high_risk = projects[
         projects[
             "risk_level"
@@ -331,9 +447,7 @@ def get_high_risk_projects():
         )
     ]
 
-
     results = []
-
 
     for _, row in high_risk.iterrows():
 
@@ -382,7 +496,6 @@ def get_high_risk_projects():
             )
         })
 
-
     return {
 
         "total_high_risk_projects": len(results),
@@ -401,19 +514,13 @@ def get_risk_summary():
 
     projects = run_pipeline()
 
-
     counts = (
-
         projects[
             "risk_level"
         ]
-
         .value_counts()
-
         .to_dict()
-
     )
-
 
     return {
 
