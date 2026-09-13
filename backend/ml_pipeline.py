@@ -1,4 +1,5 @@
 import pandas as pd
+import requests
 import numpy as np
 
 from difflib import SequenceMatcher
@@ -127,29 +128,285 @@ class IsolationTree:
 
 
 # ============================================================
+# OFFICIAL MPLADS API DATA LOADER
+# ============================================================
+
+MPLADS_BASE_URL = "https://mplads.mospi.gov.in/rest/PreLoginDashboardData"
+
+
+KEY_RECOMMENDED = "Works Recommended"
+KEY_SANCTIONED = "Works Sanctioned"
+KEY_COMPLETED = "Works Completed"
+KEY_EXPENDITURE = "Expenditure on Completed and On-going Works as on Date"
+
+
+def _parse_mplads_payload(response):
+    """Parse the nested JSON format returned by the MPLADS dashboard API."""
+
+    response.raise_for_status()
+    payload = response.json()
+
+    # The API normally returns: {some_key: "[ {...}, {...} ]"}
+    if isinstance(payload, dict):
+        values = list(payload.values())
+        if len(values) == 1:
+            payload = values[0]
+
+    if isinstance(payload, str):
+        import json
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return []
+
+    if isinstance(payload, dict):
+        # Some responses wrap the actual records in a common property.
+        for key in ("data", "records", "result", "rows"):
+            if key in payload and isinstance(payload[key], (list, dict, str)):
+                payload = payload[key]
+                break
+
+    if isinstance(payload, str):
+        import json
+        try:
+            payload = json.loads(payload)
+        except json.JSONDecodeError:
+            return []
+
+    if isinstance(payload, dict):
+        payload = [payload]
+
+    if not isinstance(payload, list):
+        return []
+
+    return [item for item in payload if isinstance(item, dict)]
+
+
+def _fetch_mplads_report(combo, key):
+    """Fetch one project/report dataset for a specific MPLADS combo."""
+
+    url = f"{MPLADS_BASE_URL}/getTilesReportData"
+
+    response = requests.post(
+        url,
+        json={
+            "combo": combo,
+            "key": key,
+        },
+        timeout=60,
+    )
+
+    return _parse_mplads_payload(response)
+
+
+def _records_to_dataframe(records):
+    if not records:
+        return pd.DataFrame()
+    return pd.DataFrame(records)
+
+
+def _ensure_columns(df, required_columns):
+    """
+    Ensure an API/report DataFrame has the columns expected by the
+    downstream pipeline. This is especially important when an official
+    MPLADS report returns zero rows: pandas otherwise creates a DataFrame
+    with no columns, which would cause KeyError during merges/groupby.
+    """
+    if df is None:
+        df = pd.DataFrame()
+
+    df = df.copy()
+
+    for column in required_columns:
+        if column not in df.columns:
+            df[column] = pd.NA
+
+    return df
+
+
+def _prepare_report_frames(recommended, sanctioned, completed, expenditure):
+    """
+    Normalize all four MPLADS report frames before the main pipeline runs.
+    Empty sanctioned/completed/expenditure reports are valid and should
+    simply contribute missing values rather than crash the analysis.
+    """
+
+    recommended = _ensure_columns(
+        recommended,
+        [
+            "WORK_RECOMMENDATION_DTL_ID",
+            "RECOMMENDED_AMOUNT",
+            "SANCTION_AMOUNT",
+            "SANCTION_DATE",
+            "RECOMMENDATION_DATE",
+            "ACTIVITY_NAME",
+            "WORK_CATEGORY",
+            "WORK_DESCRIPTION",
+        ],
+    )
+
+    sanctioned = _ensure_columns(
+        sanctioned,
+        [
+            "WORK_RECOMMENDATION_DTL_ID",
+            "SANCTION_AMOUNT",
+            "SANCTION_DATE",
+        ],
+    )
+
+    completed = _ensure_columns(
+        completed,
+        [
+            "WORK_RECOMMENDATION_DTL_ID",
+            "ACTUAL_AMOUNT",
+            "ACTUAL_END_DATE",
+            "AVERAGE_RATING",
+        ],
+    )
+
+    expenditure = _ensure_columns(
+        expenditure,
+        [
+            "WORK_RECOMMENDATION_DTL_ID",
+            "EXPENDITURE_DATE",
+            "FUND_DISBURSED_AMT",
+            "VENDOR_NAME",
+        ],
+    )
+
+    return recommended, sanctioned, completed, expenditure
+
+
+def fetch_selected_mplads_data(
+    state_id,
+    constituency_id,
+    mp_id,
+    house_id=2,
+):
+    """
+    Fetch the four datasets required by the existing risk pipeline for the
+    selected State -> Constituency -> MP combination.
+
+    The combo used by the official MPLADS report API is:
+        state_id,constituency_id,mp_id,house_id
+    """
+
+    if state_id is None or constituency_id is None or mp_id is None:
+        raise ValueError(
+            "state_id, constituency_id and mp_id are required for live analysis"
+        )
+
+    combo = f"{int(state_id)},{int(constituency_id)},{int(mp_id)},{int(house_id)}"
+
+    recommended = _records_to_dataframe(
+        _fetch_mplads_report(combo, KEY_RECOMMENDED)
+    )
+    sanctioned = _records_to_dataframe(
+        _fetch_mplads_report(combo, KEY_SANCTIONED)
+    )
+    completed = _records_to_dataframe(
+        _fetch_mplads_report(combo, KEY_COMPLETED)
+    )
+    expenditure = _records_to_dataframe(
+        _fetch_mplads_report(combo, KEY_EXPENDITURE)
+    )
+
+    # Make empty report datasets safe for the downstream pipeline.
+    if recommended.empty:
+        raise ValueError(
+            "MPLADS returned no recommended works for the selected State, "
+            "Constituency and MP."
+        )
+
+    return recommended, sanctioned, completed, expenditure
+
+
+# ============================================================
 # MAIN PIPELINE
 # ============================================================
 
-def run_pipeline():
+def run_pipeline(
+    state_id=None,
+    constituency_id=None,
+    mp_id=None,
+    house_id=2,
+):
 
     # ========================================================
     # 1. LOAD DATA
     # ========================================================
+    #
+    # No filters -> preserve the original local CSV dataset.
+    # State/Constituency/MP filters -> fetch the selected MP's
+    # live MPLADS datasets and run the exact same pipeline.
+    # ========================================================
 
-    recommended = pd.read_csv(
-        BASE_DIR / "recommended.csv"
+    live_selection = any(
+        value is not None
+        for value in (state_id, constituency_id, mp_id)
     )
 
-    sanctioned = pd.read_csv(
-        BASE_DIR / "sanctioned.csv"
-    )
+    if live_selection:
 
-    completed = pd.read_csv(
-        BASE_DIR / "completed.csv"
-    )
+        if not all(
+            value is not None
+            for value in (state_id, constituency_id, mp_id)
+        ):
+            raise ValueError(
+                "state_id, constituency_id and mp_id must all be provided "
+                "for filtered live analysis"
+            )
 
-    expenditure = pd.read_csv(
-        BASE_DIR / "expenditure.csv"
+        (
+            recommended,
+            sanctioned,
+            completed,
+            expenditure,
+        ) = fetch_selected_mplads_data(
+            state_id=state_id,
+            constituency_id=constituency_id,
+            mp_id=mp_id,
+            house_id=house_id,
+        )
+
+    else:
+
+        recommended = pd.read_csv(
+            BASE_DIR / "recommended.csv"
+        )
+
+        sanctioned = pd.read_csv(
+            BASE_DIR / "sanctioned.csv"
+        )
+
+        completed = pd.read_csv(
+            BASE_DIR / "completed.csv"
+        )
+
+        expenditure = pd.read_csv(
+            BASE_DIR / "expenditure.csv"
+        )
+
+
+    # ========================================================
+    # Normalize report schemas
+    # ========================================================
+    #
+    # The official MPLADS API legitimately returns zero records for some
+    # report types. A zero-row DataFrame has no columns, so normalize all
+    # four report frames before any column selection/groupby operation.
+    # ========================================================
+
+    (
+        recommended,
+        sanctioned,
+        completed,
+        expenditure,
+    ) = _prepare_report_frames(
+        recommended,
+        sanctioned,
+        completed,
+        expenditure,
     )
 
 
@@ -164,6 +421,14 @@ def run_pipeline():
             "WORK_RECOMMENDATION_DTL_ID"
         ].notna()
     ].copy()
+
+    if projects.empty:
+        if live_selection:
+            raise ValueError(
+                "MPLADS returned no recommended works for the selected "
+                "State, Constituency and MP."
+            )
+        return projects
 
 
     # ========================================================
@@ -189,6 +454,9 @@ def run_pipeline():
     )
 
 
+    # Empty expenditure reports are valid. Because the frame was normalized
+    # above, this groupby safely produces an empty summary with the expected
+    # columns instead of raising KeyError.
     expenditure_summary = (
 
         expenditure
@@ -384,14 +652,12 @@ def run_pipeline():
     completed_lookup = (
 
         completed[
-
             [
                 "WORK_RECOMMENDATION_DTL_ID",
                 "ACTUAL_AMOUNT",
                 "ACTUAL_END_DATE",
                 "AVERAGE_RATING"
             ]
-
         ]
 
         .drop_duplicates(
@@ -399,7 +665,6 @@ def run_pipeline():
         )
 
         .copy()
-
     )
 
 
@@ -1052,12 +1317,13 @@ def run_pipeline():
     # ========================================================
 
     vendor_data = expenditure[
-
         expenditure[
             "VENDOR_NAME"
         ].notna()
-
     ].copy()
+
+    # A selected MP may have no expenditure records or no vendor information.
+    # In that case vendor analysis remains unavailable rather than crashing.
 
 
     if len(vendor_data) > 0:
@@ -2452,6 +2718,7 @@ def run_pipeline():
                 )
 
             )
+            
 
 
     # ========================================================
